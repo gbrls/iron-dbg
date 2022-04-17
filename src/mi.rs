@@ -1,15 +1,22 @@
+use crate::mi;
+
 pub enum MIVal {
     Done,
     Err,
 }
 
-pub enum OutputKind {
-    /// **Symbol**: `+`  
-    /// On-going status information about the progress of a slow operation. **It can be discarded.**
+#[derive(Debug, Clone, PartialEq)]
+pub enum Output {
+    ///  **Symbol**: `+`  
+    ///  On-going status information about the progress of a slow operation. **It can be discarded.**
     StatusAsync,
     /// **Symbol**: `*`
-    /// asynchronous state change on the target (stopped, started, disappeared).
-    ExecAsync,
+    /// asynchronous state change on the target (stopped, started, disappeared).  
+    /// Docs: https://sourceware.org/gdb/onlinedocs/gdb/GDB_002fMI-Async-Records.html
+    ExecAsync {
+        state: Option<ExecutionState>,
+        rest: String,
+    },
     /// **Symbol**: `=`
     /// supplementary information that the client should handle (e.g., a new breakpoint information).
     NotifyAsync,
@@ -24,24 +31,27 @@ pub enum OutputKind {
     LogStream,
     /// **Symbol**: `^`
     /// No doc from GDB MI
-    Response,
+    Response { result: Option<ExecutionState> },
 }
 
-pub enum ResponseResult {
+#[derive(Debug, Clone, PartialEq)]
+pub enum ExecutionState {
     Done,
     Running,
     Connected,
     Error,
     Exit,
+    Stopped,
 }
 
-fn response_result(input: &str) -> Option<(ResponseResult, usize)> {
+fn execution_state(input: &str) -> Option<(ExecutionState, usize)> {
     let pats = [
-        (ResponseResult::Done, "done"),
-        (ResponseResult::Running, "running"),
-        (ResponseResult::Connected, "connected"),
-        (ResponseResult::Error, "error"),
-        (ResponseResult::Exit, "exit"),
+        (ExecutionState::Done, "done"),
+        (ExecutionState::Running, "running"),
+        (ExecutionState::Connected, "connected"),
+        (ExecutionState::Error, "error"),
+        (ExecutionState::Exit, "exit"),
+        (ExecutionState::Stopped, "stopped"),
     ];
 
     match pats.into_iter().find(|x| input.starts_with(x.1)) {
@@ -50,8 +60,8 @@ fn response_result(input: &str) -> Option<(ResponseResult, usize)> {
     }
 }
 
-pub fn output_kind(input: &str) -> Option<(OutputKind, usize)> {
-    use OutputKind::*;
+pub fn output_kind(input: &str) -> Option<(Output, usize)> {
+    use Output::*;
 
     if input.is_empty() {
         return None;
@@ -59,19 +69,101 @@ pub fn output_kind(input: &str) -> Option<(OutputKind, usize)> {
 
     match input.chars().next().unwrap() {
         '+' => Some((StatusAsync, 1)),
-        '*' => Some((ExecAsync, 1)),
+        '*' => Some((
+            ExecAsync {
+                state: None,
+                rest: String::new(),
+            },
+            1,
+        )),
         '=' => Some((NotifyAsync, 1)),
         '~' => Some((ConsoleStream, 1)),
         '@' => Some((TargetStream, 1)),
         '&' => Some((LogStream, 1)),
-        '^' => Some((Response, 1)),
+        '^' => Some((Response { result: None }, 1)),
 
         _ => None,
     }
 }
 
-pub fn parse(input: &str) -> MIVal {
-    use MIVal::*;
+pub fn apply_parser<T>(f: fn(&str) -> Option<(T, usize)>, input: &str) -> Option<(T, &str)> {
+    if let Some((val, read)) = f(input) {
+        Some((val, &input[read..]))
+    } else {
+        None
+    }
+}
 
-    Done
+pub fn parse(input: &str) -> Option<Output> {
+    use Output::*;
+
+    match apply_parser(output_kind, input) {
+        Some((Response { result: None }, input)) => {
+            let res = if let Some((response_result, input)) = apply_parser(execution_state, input) {
+                Some(response_result)
+            } else {
+                None
+            };
+            Some(Response { result: res })
+        }
+
+        Some((
+            ExecAsync {
+                state: None,
+                rest: r,
+            },
+            input,
+        )) => {
+            let (state, rest_input) =
+                if let Some((state, rest_input)) = apply_parser(execution_state, input) {
+                    (Some(state), rest_input)
+                } else {
+                    (None, "")
+                };
+
+            Some(
+                (ExecAsync {
+                    state,
+                    rest: rest_input.to_string(),
+                }),
+            )
+        }
+
+        Some((x, _)) => Some(x),
+        None => None,
+    }
+    //if let Some((Output::Response, input)) = apply_parser(output_kind, input) {
+    //    let (resp, input) = apply_parser(response_result, input).unwrap();
+    //    println!("[Resp] {resp:?}");
+    //}
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_response_result() {
+        assert_eq!(
+            apply_parser(execution_state, "done").unwrap().0,
+            ExecutionState::Done
+        );
+    }
+
+    #[test]
+    fn test_parse() {
+        assert_eq!(
+            parse("^done"),
+            Some(Output::Response {
+                result: Some(ExecutionState::Done)
+            })
+        );
+
+        assert_eq!(
+            parse("^running"),
+            Some(Output::Response {
+                result: Some(ExecutionState::Running)
+            })
+        );
+    }
 }

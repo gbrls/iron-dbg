@@ -27,7 +27,7 @@ pub enum ControlState {
     StartGDB {
         sent_command: bool,
     },
-    GDBStarted,
+    GDBNothingLoaded,
     AttachFileDialog {
         sent_command: u32,
         path: Option<String>,
@@ -36,10 +36,19 @@ pub enum ControlState {
         sent_command: u32,
         host: Option<String>,
     },
+
+    GDBRunning {
+        state: GDBExecutionState,
+        last_output: Option<mi::Output>,
+    },
 }
 
-#[derive(Debug, Clone)]
-pub enum GDBExecutionState {}
+#[derive(Debug, Clone, PartialEq)]
+pub enum GDBExecutionState {
+    Running,
+    Stopped,
+    Unknown,
+}
 
 impl ControlState {
     pub fn new() -> ControlState {
@@ -51,7 +60,7 @@ impl ControlState {
     pub fn buttons(&self) -> Vec<String> {
         use ControlState::*;
         match self {
-            GDBStarted => ["Attach to port (QEMU)", "Load binary"].to_cmds(),
+            GDBNothingLoaded => ["Attach to port (QEMU)", "Load binary"].to_cmds(),
             AttachFileDialog {
                 sent_command: 0, ..
             } => ["Load"].to_cmds(),
@@ -90,7 +99,7 @@ pub fn user_output(src: &str) -> Option<String> {
     };
 
     match mi::output_kind(&src) {
-        Some((mi::OutputKind::ConsoleStream, _)) => Some(src[1..].to_string()),
+        Some((mi::Output::ConsoleStream, _)) => Some(src[1..].to_string()),
         //None => Some(src),
         _ => None,
     }
@@ -159,15 +168,29 @@ pub fn read_console_input(state: ControlState, input: &ConsoleOutput) -> Control
         },
 
         StartGDB { sent_command: true } => match input {
-            Stdout(_) => GDBStarted,
+            Stdout(_) => GDBNothingLoaded,
             Stderr(e) => panic!("Can't start GDB {e}"),
         },
 
         AttachFileDialog {
             sent_command: 2, ..
-        } => AttachFileDialog {
-            sent_command: 0,
-            path: None,
+        } => GDBRunning {
+            state: GDBExecutionState::Unknown,
+            last_output: None,
+        },
+
+        GDBRunning {
+            state: s,
+            last_output: last,
+        } => match input {
+            Stdout(input) => {
+                let output = mi::parse(input);
+                GDBRunning {
+                    state: s,
+                    last_output: if !output.is_none() { output } else { last },
+                }
+            }
+            Stderr(e) => panic!("{}", e),
         },
 
         _ => state,
@@ -181,7 +204,7 @@ pub fn read_button_input(
 ) -> ControlState {
     use ControlState::*;
     match state {
-        GDBStarted => {
+        GDBNothingLoaded => {
             if buttons[0] {
                 TryAttachPort {
                     sent_command: 0,
@@ -193,7 +216,7 @@ pub fn read_button_input(
                     path: None,
                 }
             } else {
-                GDBStarted
+                GDBNothingLoaded
             }
         }
 

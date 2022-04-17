@@ -2,12 +2,13 @@ use eframe::egui;
 use eframe::egui::TextStyle;
 use eframe::epaint::Vec2;
 use std::error;
-use std::fmt::Pointer;
+use std::fmt::{Debug, Display, Formatter, Pointer};
 use std::fs::read;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
+use std::vec::IntoIter;
 use tokio::io::AsyncBufReadExt;
 use tokio::time::timeout;
 use tokio::{
@@ -21,6 +22,27 @@ mod mi;
 mod parser;
 
 use crate::control::{user_output, ControlState, InputCommand};
+
+#[derive(Debug, Clone)]
+struct History<T: Clone + Debug + PartialEq> {
+    pub stored: Vec<T>,
+}
+
+impl<T: Clone + Debug + PartialEq> History<T> {
+    fn new() -> History<T> {
+        History { stored: Vec::new() }
+    }
+
+    fn last(&self) -> Option<T> {
+        self.stored.last().cloned()
+    }
+
+    fn update(&mut self, val: &T) {
+        if self.stored.is_empty() || self.stored.last().unwrap() != val {
+            self.stored.push(val.clone());
+        }
+    }
+}
 
 #[derive(Debug)]
 pub enum ConsoleOutput {
@@ -38,6 +60,7 @@ struct MyApp {
     console_output: Arc<Mutex<String>>,
     input_fields: Vec<String>,
     gdb_state: Arc<Mutex<control::ControlState>>,
+    state_history: Arc<Mutex<History<control::ControlState>>>,
 }
 
 impl MyApp {
@@ -51,6 +74,9 @@ impl MyApp {
         let gdb_state_handle = Arc::new(Mutex::new(ControlState::new()));
         let reader_gdb_handle = gdb_state_handle.clone();
 
+        let gdb_state_hist = Arc::new(Mutex::new(History::new()));
+        let gdb_state_hist_console = gdb_state_hist.clone();
+
         let consume_console_handle = tokio::spawn(async move {
             while let Some(cmd) = receiver.recv().await {
                 let mut console_out = reader_console_handle.lock().unwrap();
@@ -63,6 +89,7 @@ impl MyApp {
                 let next_state = control::read_console_input(cur_state, &cmd);
 
                 {
+                    gdb_state_hist_console.lock().unwrap().update(&next_state);
                     *reader_gdb_handle.lock().unwrap() = next_state;
                 }
 
@@ -94,6 +121,7 @@ impl MyApp {
             reader_handle: consume_console_handle,
             gdb_state: gdb_state_handle.clone(),
             input_fields,
+            state_history: gdb_state_hist,
         }
     }
 
@@ -115,9 +143,15 @@ impl eframe::epi::App for MyApp {
             s
         };
 
+        let history = {
+            let h = self.state_history.lock().unwrap().clone();
+            h
+        };
+
         let (next_state, cmds) = control::advance_cmds(&cur_state);
 
         {
+            self.state_history.lock().unwrap().update(&cur_state);
             *self.gdb_state.lock().unwrap() = next_state.clone();
         }
 
@@ -157,6 +191,17 @@ impl eframe::epi::App for MyApp {
                             );
                         });
                     }
+
+                    ui.label("State history");
+
+                    egui::ScrollArea::vertical()
+                        .max_height(f32::INFINITY)
+                        .max_width(f32::INFINITY)
+                        .show(ui, |ui| {
+                            for s in history.stored {
+                                ui.monospace(format!("{s:?}"));
+                            }
+                        });
                 });
 
             //egui::TopBottomPanel::bottom("Console")
@@ -199,6 +244,7 @@ impl eframe::epi::App for MyApp {
 
         if buttons.iter().any(|x| *x) {
             let next_state = control::read_button_input(cur_state, &buttons, &self.input_fields);
+            self.state_history.lock().unwrap().update(&next_state);
             *self.gdb_state.lock().unwrap() = next_state;
         }
     }
