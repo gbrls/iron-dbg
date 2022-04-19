@@ -4,7 +4,16 @@ use crate::ConsoleOutput;
 use crate::ControlState::{AttachFileDialog, SendCommand};
 use snailquote::unescape;
 use std::cell::RefCell;
+use std::fmt;
+use std::fmt::{write, Formatter};
 use std::rc::Rc;
+
+use static_init::dynamic;
+
+/// We need to keep track of the commands we sent to the shell to be able to backtrack errors and
+/// restart a shell and go back to a known state
+#[dynamic(drop)]
+static mut CMD_HISTORY: Vec<String> = Vec::new();
 
 trait ToCommandVec {
     fn to_cmds(self) -> Vec<String>;
@@ -21,22 +30,29 @@ pub enum InputCommand {
     StdinInput(String),
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone)]
+struct BoxedFn(Arc<dyn Fn(ControlState, ConsoleOutput) -> ControlState + Send + Sync>);
+
+impl BoxedFn {
+    fn call(&self, a: ControlState, b: ConsoleOutput) -> ControlState {
+        if let BoxedFn(f) = self {
+            (f)(a, b)
+        } else {
+            panic!("WTF")
+        }
+    }
+}
+
+#[derive(Clone, PartialEq, Debug)]
 pub enum ControlState {
-    LookingForGDB {
-        sent_command: bool,
-    },
+    LookingForGDB,
     GDBNotFound,
-    StartGDB {
-        sent_command: bool,
-    },
+    StartGDB,
     GDBNothingLoaded,
     AttachFileDialog {
-        sent_command: u32,
         path: Option<String>,
     },
     TryAttachPort {
-        sent_command: u32,
         host: Option<String>,
     },
 
@@ -47,9 +63,21 @@ pub enum ControlState {
 
     SendCommand {
         commands: Vec<String>,
-        check: Arc<dyn FnOnce(ControlState, ConsoleOutput) -> ControlState>, //commands: Vec<&'static str>,
+        check: BoxedFn, //commands: Vec<&'static str>,
         sent: bool,
     },
+}
+
+impl fmt::Debug for BoxedFn {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(f, "#function")
+    }
+}
+
+impl PartialEq for BoxedFn {
+    fn eq(&self, other: &Self) -> bool {
+        true
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -61,54 +89,46 @@ pub enum GDBExecutionState {
 
 impl ControlState {
     pub fn new() -> ControlState {
-        ControlState::LookingForGDB {
-            sent_command: false,
-        }
+        ControlState::LookingForGDB
     }
 
-    pub fn buttons(&self) -> Vec<String> {
+    pub fn buttons(&self) -> &[(&str, fn(&ControlState, &[String]) -> ControlState)] {
         use ControlState::*;
         match self {
-            GDBNothingLoaded => ["Attach to port (QEMU)", "Load binary"].to_cmds(),
-            AttachFileDialog {
-                sent_command: 0, ..
-            } => ["Load"].to_cmds(),
+            GDBNothingLoaded => &[
+                ("Attach to port (QEMU)", |_, _| -> ControlState {
+                    ControlState::TryAttachPort { host: None }
+                }),
+                ("Load binary", |_, str_in| -> ControlState {
+                    ControlState::AttachFileDialog { path: None }
+                }),
+            ],
+            AttachFileDialog { path: None } => &[("Load", |_, str_in| -> ControlState {
+                ControlState::AttachFileDialog {
+                    path: Some(str_in[0].clone()),
+                }
+            })],
 
-            TryAttachPort {
-                sent_command: 0, ..
-            } => ["Connect"].to_cmds(),
-            _ => vec![],
-        }
-    }
-
-    pub fn buttons_n(&self) -> &[(&str, fn(&ControlState) -> ControlState)] {
-        use ControlState::*;
-        match self {
-            GDBNothingLoaded => &[(
-                "Attach to port (QEMU)",
-                |old: &ControlState| -> ControlState { ControlState::GDBNotFound },
-            )],
+            TryAttachPort { host: None } => &[("Connect", |_, str_in| -> ControlState {
+                ControlState::TryAttachPort {
+                    host: Some(str_in[0].clone()),
+                }
+            })],
             _ => &[],
         }
     }
 
-    pub fn input_fields(&self) -> Vec<(String, String)> {
+    pub fn input_fields(&self) -> &[(&str, &str)] {
         use ControlState::*;
         match self {
-            AttachFileDialog {
-                sent_command: 0 | 1,
-                ..
-            } => vec![("Filename".into(), "type binary path".into())],
+            AttachFileDialog { path: None } => &[("Filename", "./res/a.out")],
 
-            TryAttachPort {
-                sent_command: 0 | 1,
-                ..
-            } => vec![("Host Address".into(), "type the host's addr".into())],
-            _ => vec![],
+            TryAttachPort { host: None } => &[("Host Address", "127.0.0.1:1234")],
+            _ => &[],
         }
     }
 
-    fn no_stderr(next: ControlState) -> impl FnOnce(ControlState, ConsoleOutput) -> ControlState {
+    fn no_stderr(next: ControlState) -> impl Fn(ControlState, ConsoleOutput) -> ControlState {
         move |state, input| match input {
             ConsoleOutput::Stdout(_) => next.clone(),
             ConsoleOutput::Stderr(e) => panic!("{}", e),
@@ -117,12 +137,12 @@ impl ControlState {
 
     fn send_commands(
         cmds: &[&str],
-        check: Arc<dyn FnOnce(ControlState, ConsoleOutput) -> ControlState>,
+        check: impl Fn(ControlState, ConsoleOutput) -> ControlState + Sync + Send + 'static,
     ) -> ControlState {
         SendCommand {
             commands: cmds.into_iter().map(|&s| s.into()).collect(),
             sent: false,
-            check: check.clone(),
+            check: BoxedFn(Arc::new(check)),
         }
     }
 }
@@ -156,36 +176,39 @@ pub fn advance_cmds(state: &ControlState) -> (ControlState, Vec<String>) {
         LookingForGDB { .. } => (
             ControlState::send_commands(
                 &["gdb --version", "which gdb"],
-                Arc::new(ControlState::no_stderr(StartGDB {
-                    sent_command: false,
-                })),
+                ControlState::no_stderr(StartGDB),
             ),
             vec![],
         ),
-        //        LookingForGDB {
-        //            sent_command: false,
-        //        } => (
-        //            LookingForGDB { sent_command: true },
-        //            ["gdb --version", "which gdb"].to_cmds(),
-        //        ),
-        //
-        //        StartGDB {
-        //            sent_command: false,
-        //        } => (
-        //            StartGDB { sent_command: true },
-        //            ["gdb --interpreter=mi"].to_cmds(),
-        //        ),
-        //
-        //        AttachFileDialog {
-        //            sent_command: 1,
-        //            path: Some(p),
-        //        } => (
-        //            AttachFileDialog {
-        //                sent_command: 2,
-        //                path: Some(p.clone()),
-        //            },
-        //            vec![format!("file {p}"), "start".into()],
-        //        ),
+        StartGDB { .. } => (
+            ControlState::send_commands(
+                &["gdb --interpreter=mi3"],
+                ControlState::no_stderr(GDBNothingLoaded),
+            ),
+            vec![],
+        ),
+
+        AttachFileDialog { path: Some(p) } => (
+            ControlState::send_commands(
+                &[&format!("file {p}"), "start"],
+                ControlState::no_stderr(GDBRunning {
+                    state: GDBExecutionState::Unknown,
+                    last_output: None,
+                }),
+            ),
+            vec![],
+        ),
+
+        TryAttachPort { host: Some(h) } => (
+            ControlState::send_commands(
+                &[&format!("target remote {h}")],
+                ControlState::no_stderr(GDBRunning {
+                    state: GDBExecutionState::Unknown,
+                    last_output: None,
+                }),
+            ),
+            vec![],
+        ),
         //
         //        TryAttachPort {
         //            sent_command: 1,
@@ -202,14 +225,22 @@ pub fn advance_cmds(state: &ControlState) -> (ControlState, Vec<String>) {
             commands: cmds,
             check: f,
             sent: false,
-        } => (
-            SendCommand {
-                commands: cmds.clone(),
-                check: *f,
-                sent: true,
-            },
-            cmds.clone(),
-        ),
+        } => {
+            unsafe {
+                let mut lock = CMD_HISTORY.write();
+                for cmd in cmds {
+                    lock.push(cmd.clone());
+                }
+            }
+            (
+                SendCommand {
+                    commands: cmds.clone(),
+                    check: f.clone(),
+                    sent: true,
+                },
+                cmds.clone(),
+            )
+        }
         _ => (state.clone(), vec![]),
     }
 }
@@ -219,18 +250,6 @@ pub fn read_console_input(state: ControlState, input: &ConsoleOutput) -> Control
     use ControlState::*;
 
     match state {
-        //LookingForGDB { sent_command: true } => match input {
-        //    Stdout(_) => StartGDB {
-        //        sent_command: false,
-        //    },
-        //    Stderr(_) => GDBNotFound,
-        //},
-
-        //StartGDB { sent_command: true } => match input {
-        //    Stdout(_) => GDBNothingLoaded,
-        //    Stderr(e) => panic!("Can't start GDB {e}"),
-        //},
-
         //AttachFileDialog {
         //    sent_command: 2, ..
         //} => GDBRunning {
@@ -238,10 +257,10 @@ pub fn read_console_input(state: ControlState, input: &ConsoleOutput) -> Control
         //    last_output: None,
         //},
         SendCommand {
-            check: f,
+            check: BoxedFn(ref f),
             sent: true,
             ..
-        } => f(state, *input),
+        } => f(state.clone(), input.clone()),
 
         GDBRunning {
             state: s,
@@ -261,19 +280,20 @@ pub fn read_console_input(state: ControlState, input: &ConsoleOutput) -> Control
     }
 }
 
+//TODO: delete this function
 pub fn read_button_input(
     state: ControlState,
     buttons: &[bool],
-    input_fields: &[String],
+    input_fields: &[&str],
 ) -> ControlState {
-    let opts = state.buttons_n();
+    let opts = state.buttons();
 
     let mut next = state.clone();
-    for (btn, (_, f)) in buttons.iter().zip(opts) {
-        if *btn {
-            next = f(&state);
-        }
-    }
+    // for (btn, (_, f)) in buttons.iter().zip(opts) {
+    //     if *btn {
+    //         next = f(&state, input_fields);
+    //     }
+    // }
 
     next
 

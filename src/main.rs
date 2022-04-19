@@ -38,13 +38,17 @@ impl<T: Clone + Debug + PartialEq> History<T> {
     }
 
     fn update(&mut self, val: &T) {
-        if self.stored.is_empty() || self.stored.last().unwrap() != val {
+        if self.is_new(val) {
             self.stored.push(val.clone());
         }
     }
+
+    fn is_new(&self, val: &T) -> bool {
+        self.stored.is_empty() || self.stored.last().unwrap() != val
+    }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum ConsoleOutput {
     Stdout(String),
     Stderr(String),
@@ -108,7 +112,7 @@ impl MyApp {
         });
 
         let mut input_fields = vec![];
-        input_fields.push("./res/a.out".to_string());
+        //input_fields.push("./res/a.out".to_string());
         for _ in 0..20 {
             input_fields.push("".to_string());
         }
@@ -138,6 +142,7 @@ impl MyApp {
 
 impl eframe::epi::App for MyApp {
     fn update(&mut self, ctx: &eframe::egui::Context, frame: &eframe::epi::Frame) {
+        // TODO: create a function to handle this
         let cur_state = {
             let s = self.gdb_state.lock().unwrap().clone();
             s
@@ -155,9 +160,13 @@ impl eframe::epi::App for MyApp {
             *self.gdb_state.lock().unwrap() = next_state.clone();
         }
 
-        if &cur_state != &next_state {
-            println!("New state");
-        }
+        //if &cur_state != &next_state {
+        //    println!("-------------------------------New state!");
+        //    for (i, (label, default)) in next_state.input_fields().iter().enumerate() {
+        //        println!("Overwriting {} with {}", self.input_fields[i], *default);
+        //        self.input_fields[i] = (*default).into();
+        //    }
+        //}
 
         let cur_state = next_state;
 
@@ -165,33 +174,56 @@ impl eframe::epi::App for MyApp {
             self.send_stdin(&cmd);
         }
 
-        let mut buttons = vec![];
-
         egui::CentralPanel::default().show(ctx, |ui| {
             egui::TopBottomPanel::top("A")
                 .resizable(true)
                 .show_inside(ui, |ui| {
                     ui.heading("Iron Debugger");
                     ui.label("The debugger that's about to Rust");
+
+                    ui.separator();
+
                     ui.monospace(format!("state: {cur_state:?}"));
 
-                    ui.horizontal(|ui| {
-                        for btn in cur_state.buttons() {
-                            buttons.push(ui.button(btn).clicked());
-                        }
-                    });
-
-                    for (i, (label, input)) in cur_state.input_fields().iter().enumerate() {
+                    for (i, (label, default)) in cur_state.input_fields().iter().enumerate() {
                         ui.horizontal(|ui| {
-                            ui.label(label);
+                            ui.label(*label);
                             ui.add(
                                 egui::TextEdit::singleline(&mut self.input_fields[i])
-                                    .hint_text("...")
+                                    .hint_text(*default)
                                     .font(TextStyle::Monospace),
                             );
                         });
                     }
+                    ui.horizontal(|ui| {
+                        for (btn, f) in cur_state.buttons() {
+                            if ui.button(*btn).clicked() {
+                                let fields = self
+                                    .input_fields
+                                    .iter()
+                                    .zip(cur_state.input_fields().iter())
+                                    .map(
+                                        |(a, (_, b))| {
+                                            if a.is_empty() {
+                                                (*b).into()
+                                            } else {
+                                                a.clone()
+                                            }
+                                        },
+                                    )
+                                    .collect::<Vec<_>>();
 
+                                let next = f(&cur_state, &fields);
+
+                                self.state_history.lock().unwrap().update(&next);
+                                *self.gdb_state.lock().unwrap() = next;
+
+                                break;
+                            }
+                        }
+                    });
+
+                    ui.separator();
                     ui.label("State history");
 
                     egui::ScrollArea::vertical()
@@ -242,11 +274,11 @@ impl eframe::epi::App for MyApp {
             });
         });
 
-        if buttons.iter().any(|x| *x) {
-            let next_state = control::read_button_input(cur_state, &buttons, &self.input_fields);
-            self.state_history.lock().unwrap().update(&next_state);
-            *self.gdb_state.lock().unwrap() = next_state;
-        }
+        //if buttons.iter().any(|x| *x) {
+        //    let next_state = control::read_button_input(cur_state, &buttons, &self.input_fields);
+        //    self.state_history.lock().unwrap().update(&next_state);
+        //    *self.gdb_state.lock().unwrap() = next_state;
+        //}
     }
 
     fn name(&self) -> &str {
