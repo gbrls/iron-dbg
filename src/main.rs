@@ -21,7 +21,7 @@ mod control;
 mod mi;
 mod parser;
 
-use crate::control::{user_output, ControlState, InputCommand};
+use crate::control::{ControlState, InputCommand};
 
 #[derive(Debug, Clone)]
 struct History<T: Clone + Debug + PartialEq> {
@@ -102,7 +102,7 @@ impl MyApp {
                     ConsoleOutput::Stderr(s) => s,
                 };
 
-                match control::user_output(&cmd_str) {
+                match mi::user_output(&cmd_str) {
                     Some(s) => console_out.push_str(&s),
                     _ => {}
                 }
@@ -229,6 +229,8 @@ impl eframe::epi::App for MyApp {
                     egui::ScrollArea::vertical()
                         .max_height(f32::INFINITY)
                         .max_width(f32::INFINITY)
+                        .stick_to_bottom()
+                        .auto_shrink([true, true])
                         .show(ui, |ui| {
                             for s in history.stored {
                                 ui.monospace(format!("{s:?}"));
@@ -236,10 +238,7 @@ impl eframe::epi::App for MyApp {
                         });
                 });
 
-            //egui::TopBottomPanel::bottom("Console")
-            // .resizable(true)
-            // .show_inside(ui, |ui| {
-            egui::Window::new("Console").show(ctx, |ui| {
+            ui.collapsing("Console", |ui| {
                 let console = {
                     let data = self.console_output.lock().unwrap().clone();
                     data
@@ -248,6 +247,7 @@ impl eframe::epi::App for MyApp {
                 egui::ScrollArea::vertical()
                     .max_height(400.0)
                     .max_width(f32::INFINITY)
+                    .stick_to_bottom()
                     .show(ui, |ui| {
                         ui.monospace(&console);
                     });

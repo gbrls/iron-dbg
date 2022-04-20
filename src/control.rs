@@ -8,6 +8,7 @@ use std::fmt;
 use std::fmt::{write, Formatter};
 use std::rc::Rc;
 
+use crate::mi::{parse, ExecutionState, Output};
 use static_init::dynamic;
 
 /// We need to keep track of the commands we sent to the shell to be able to backtrack errors and
@@ -66,6 +67,11 @@ pub enum ControlState {
         check: BoxedFn, //commands: Vec<&'static str>,
         sent: bool,
     },
+
+    RestartAndRecover {
+        sent: bool,
+        prev: Box<ControlState>,
+    },
 }
 
 impl fmt::Debug for BoxedFn {
@@ -80,11 +86,22 @@ impl PartialEq for BoxedFn {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum GDBExecutionState {
     Running,
     Stopped,
     Unknown,
+}
+
+fn execution_state_from_output(cur: &GDBExecutionState, output: &mi::Output) -> GDBExecutionState {
+    match output {
+        mi::Output::ExecAsync { state: Some(s), .. } => match s {
+            ExecutionState::Running | ExecutionState::Connected => GDBExecutionState::Running,
+            ExecutionState::Stopped => GDBExecutionState::Stopped,
+            _ => GDBExecutionState::Unknown,
+        },
+        _ => *cur,
+    }
 }
 
 impl ControlState {
@@ -100,20 +117,22 @@ impl ControlState {
                     ControlState::TryAttachPort { host: None }
                 }),
                 ("Load binary", |_, str_in| -> ControlState {
-                    ControlState::AttachFileDialog { path: None }
+                    AttachFileDialog { path: None }
                 }),
             ],
-            AttachFileDialog { path: None } => &[("Load", |_, str_in| -> ControlState {
-                ControlState::AttachFileDialog {
-                    path: Some(str_in[0].clone()),
-                }
+            AttachFileDialog { path: None } => &[("Load", |_, str_in| AttachFileDialog {
+                path: Some(str_in[0].clone()),
             })],
 
-            TryAttachPort { host: None } => &[("Connect", |_, str_in| -> ControlState {
-                ControlState::TryAttachPort {
-                    host: Some(str_in[0].clone()),
-                }
+            TryAttachPort { host: None } => &[("Connect", |_, str_in| TryAttachPort {
+                host: Some(str_in[0].clone()),
             })],
+
+            GDBRunning { .. } => &[("Reload", |prev, _| RestartAndRecover {
+                sent: false,
+                prev: Box::new(prev.clone()),
+            })],
+
             _ => &[],
         }
     }
@@ -128,6 +147,7 @@ impl ControlState {
         }
     }
 
+    // @TODO: handle GDB errors here from the STDOUT
     fn no_stderr(next: ControlState) -> impl Fn(ControlState, ConsoleOutput) -> ControlState {
         move |state, input| match input {
             ConsoleOutput::Stdout(_) => next.clone(),
@@ -144,22 +164,6 @@ impl ControlState {
             sent: false,
             check: BoxedFn(Arc::new(check)),
         }
-    }
-}
-
-pub fn user_output(src: &str) -> Option<String> {
-    let mut src = unescape(src).unwrap();
-
-    let src = if src.ends_with('\n') {
-        format!("{}\n", src.trim_end())
-    } else {
-        src
-    };
-
-    match mi::output_kind(&src) {
-        Some((mi::Output::ConsoleStream, _)) => Some(src[1..].to_string()),
-        //None => Some(src),
-        _ => None,
     }
 }
 
@@ -209,18 +213,6 @@ pub fn advance_cmds(state: &ControlState) -> (ControlState, Vec<String>) {
             ),
             vec![],
         ),
-        //
-        //        TryAttachPort {
-        //            sent_command: 1,
-        //            host: Some(h),
-        //        } => (
-        //            TryAttachPort {
-        //                sent_command: 2,
-        //                host: Some(h.clone()),
-        //            },
-        //            vec![format!("target remote {h}")],
-        //        ),
-        //
         SendCommand {
             commands: cmds,
             check: f,
@@ -241,6 +233,16 @@ pub fn advance_cmds(state: &ControlState) -> (ControlState, Vec<String>) {
                 cmds.clone(),
             )
         }
+
+        RestartAndRecover { sent: false, prev } => unsafe {
+            let mut cmds = vec!["quit".to_string(), "pwd".to_string()];
+            let len = CMD_HISTORY.read().len();
+            for cmd in &CMD_HISTORY.read()[0..len] {
+                cmds.push(cmd.clone());
+            }
+
+            (*(*prev).clone(), cmds)
+        },
         _ => (state.clone(), vec![]),
     }
 }
@@ -250,17 +252,11 @@ pub fn read_console_input(state: ControlState, input: &ConsoleOutput) -> Control
     use ControlState::*;
 
     match state {
-        //AttachFileDialog {
-        //    sent_command: 2, ..
-        //} => GDBRunning {
-        //    state: GDBExecutionState::Unknown,
-        //    last_output: None,
-        //},
         SendCommand {
-            check: BoxedFn(ref f),
+            check: BoxedFn(ref verify),
             sent: true,
             ..
-        } => f(state.clone(), input.clone()),
+        } => verify(state.clone(), input.clone()),
 
         GDBRunning {
             state: s,
@@ -269,8 +265,16 @@ pub fn read_console_input(state: ControlState, input: &ConsoleOutput) -> Control
             Stdout(input) => {
                 let output = mi::parse(input);
                 GDBRunning {
-                    state: s,
-                    last_output: if !output.is_none() { output } else { last },
+                    state: if output.is_ok() {
+                        execution_state_from_output(&s, &output.as_ref().unwrap().1)
+                    } else {
+                        s
+                    },
+                    last_output: if output.is_ok() {
+                        Some(output.unwrap().1)
+                    } else {
+                        last
+                    },
                 }
             }
             Stderr(e) => panic!("{}", e),
@@ -278,71 +282,4 @@ pub fn read_console_input(state: ControlState, input: &ConsoleOutput) -> Control
 
         _ => state,
     }
-}
-
-//TODO: delete this function
-pub fn read_button_input(
-    state: ControlState,
-    buttons: &[bool],
-    input_fields: &[&str],
-) -> ControlState {
-    let opts = state.buttons();
-
-    let mut next = state.clone();
-    // for (btn, (_, f)) in buttons.iter().zip(opts) {
-    //     if *btn {
-    //         next = f(&state, input_fields);
-    //     }
-    // }
-
-    next
-
-    //use ControlState::*;
-    //match state {
-    //    GDBNothingLoaded => {
-    //        if buttons[0] {
-    //            TryAttachPort {
-    //                sent_command: 0,
-    //                host: None,
-    //            }
-    //        } else if buttons[1] {
-    //            AttachFileDialog {
-    //                sent_command: 0,
-    //                path: None,
-    //            }
-    //        } else {
-    //            GDBNothingLoaded
-    //        }
-    //    }
-
-    //    AttachFileDialog {
-    //        sent_command: 0,
-    //        ref path,
-    //    } => {
-    //        if buttons[0] {
-    //            AttachFileDialog {
-    //                sent_command: 1,
-    //                path: Some(input_fields[0].clone()),
-    //            }
-    //        } else {
-    //            state.clone()
-    //        }
-    //    }
-
-    //    TryAttachPort {
-    //        sent_command: 0,
-    //        ref host,
-    //    } => {
-    //        if buttons[0] {
-    //            TryAttachPort {
-    //                sent_command: 1,
-    //                host: Some(input_fields[0].clone()),
-    //            }
-    //        } else {
-    //            state.clone()
-    //        }
-    //    }
-
-    //    _ => state,
-    //}
 }
