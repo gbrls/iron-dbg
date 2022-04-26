@@ -2,10 +2,93 @@ use anyhow::anyhow;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_while};
 use nom::character::complete::char;
+use nom::character::is_digit;
 use nom::combinator::{map, map_res, opt};
-use nom::sequence::{delimited, preceded};
+use nom::error::ErrorKind;
+use nom::multi::{many0, many_till};
+use nom::sequence::{delimited, preceded, terminated};
 use nom::{Err, IResult, Parser};
 use snailquote::unescape;
+
+use crate::mi_parse;
+use from_mi_derive::FromMI;
+
+trait FromMI {
+    fn from_mi(input: &str) -> IResult<&str, Self>
+    where
+        Self: Sized;
+}
+
+impl FromMI for u64 {
+    fn from_mi(input: &str) -> IResult<&str, Self> {
+        let (rest, num) = take_while(|c: char| c.is_numeric())(input)?;
+
+        match num.parse::<u64>() {
+            Ok(n) => Ok((rest, n)),
+            Err(e) => Err(nom::Err::Error(nom::error::make_error(
+                input,
+                ErrorKind::Digit,
+            ))),
+        }
+    }
+}
+
+impl FromMI for u32 {
+    fn from_mi(input: &str) -> IResult<&str, Self> {
+        let (rest, num) = take_while(|c: char| c.is_numeric())(input)?;
+
+        match num.parse::<u32>() {
+            Ok(n) => Ok((rest, n)),
+            Err(e) => Err(nom::Err::Error(nom::error::make_error(
+                input,
+                ErrorKind::Digit,
+            ))),
+        }
+    }
+}
+
+impl FromMI for String {
+    fn from_mi(input: &str) -> IResult<&str, Self> {
+        let (rest, s) = c_str(input)?;
+
+        Ok((rest, s.to_string()))
+    }
+}
+
+impl<A> FromMI for Option<A>
+where
+    A: FromMI,
+{
+    fn from_mi(input: &str) -> IResult<&str, Self>
+    where
+        Self: Sized,
+    {
+        opt(A::from_mi)(input)
+    }
+}
+
+impl<A> FromMI for Vec<A>
+where
+    A: FromMI,
+{
+    fn from_mi(input: &str) -> IResult<&str, Self>
+    where
+        Self: Sized,
+    {
+        // This wasn't made with separated_list0 because whe might want to use Vec<Optional<_>>
+        match preceded(
+            take_while(|c: char| c == '[' || c == ' '),
+            many_till(
+                terminated(A::from_mi, take_while(|c: char| c == ',' || c == ' ')),
+                char(']'),
+            ),
+        )(input)
+        {
+            Ok((rest, (a, b))) => Ok((rest, a)),
+            Err(e) => Err(e),
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Output {
@@ -17,7 +100,7 @@ pub enum Output {
     /// Docs: https://sourceware.org/gdb/onlinedocs/gdb/GDB_002fMI-Async-Records.html
     ExecAsync {
         state: Option<ExecutionState>,
-        rest: String,
+        rest: mi_parse::MIRepr,
     },
     /// # **Symbol**: `=`  
     /// supplementary information that the client should handle (e.g., a new breakpoint information).
@@ -52,10 +135,10 @@ pub enum AsyncStateStatus {
     },
     Stopped {
         reason: StoppedReason,
+        frame: Option<Frame>,
         thread: String,
         stopped_threads: String,
         core: String,
-        frame: Option<Frame>,
     },
 }
 
@@ -181,18 +264,24 @@ pub enum ExecutionState {
     Stopped,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+/// [docs](https://sourceware.org/gdb/onlinedocs/gdb/GDB_002fMI-Frame-Information.html#GDB_002fMI-Frame-Information)
+#[derive(Debug, Clone, PartialEq, FromMI)]
+#[name = "frame"]
 pub struct Frame {
+    #[name = "addr"]
     addr: u64,
+    #[name = "func"]
     func: String,
     args: Vec<String>,
     file: String,
     fullname: String,
     line: u32,
     arch: String,
+    /// GDB's docs say this field is present, but I don't see it.
     level: Option<String>,
 }
 
+/// [docs](https://sourceware.org/gdb/onlinedocs/gdb/GDB_002fMI-Breakpoint-Information.html#GDB_002fMI-Breakpoint-Information)
 #[derive(Debug, Clone, PartialEq)]
 pub struct Breakpoint {
     number: String,
@@ -208,6 +297,9 @@ pub struct Breakpoint {
     times: String,
 }
 
+//Thread docs
+// https://sourceware.org/gdb/onlinedocs/gdb/GDB_002fMI-Thread-Information.html#GDB_002fMI-Thread-Information
+
 pub fn parse(input: &str) -> IResult<&str, Output> {
     use nom::combinator::map;
     let (rest, out) = alt((
@@ -221,6 +313,10 @@ pub fn parse(input: &str) -> IResult<&str, Output> {
     ))(input)?;
 
     Ok((rest, out))
+}
+
+fn async_state_status(input: &str) -> IResult<&str, AsyncStateStatus> {
+    todo!()
 }
 
 /// [docs](https://sourceware.org/gdb/onlinedocs/gdb/GDB_002fMI-Result-Records.html#GDB_002fMI-Result-Records)
@@ -323,5 +419,39 @@ mod tests {
                 code: None
             }),
         );
+    }
+
+    #[test]
+    fn test_from_mi() {
+        assert_eq!(u64::from_mi("42").unwrap().1, 42);
+        assert_eq!(String::from_mi("\"Hello\"").unwrap().1, "Hello".to_string());
+        assert_eq!(
+            Vec::<u64>::from_mi("[ 1, 2,3,4, 5]").unwrap().1,
+            vec![1, 2, 3, 4, 5]
+        );
+
+        assert_eq!(Option::<u64>::from_mi("").unwrap().1, None);
+        assert_eq!(Option::<u64>::from_mi("1  0").unwrap().1, Some(1));
+
+        assert_eq!(
+            Vec::<Option::<u64>>::from_mi("[ 1, 2 ]").unwrap().1,
+            vec![Some(1), Some(2)]
+        );
+    }
+
+    #[test]
+    fn test_from_mi_macro() {
+        let f = Frame {
+            addr: 42,
+            func: "jjjj".to_string(),
+            args: vec![],
+            file: "sla".to_string(),
+            fullname: "idk".to_string(),
+            line: 69,
+            arch: "aaa".to_string(),
+            level: None,
+        };
+
+        Frame::print_fields();
     }
 }

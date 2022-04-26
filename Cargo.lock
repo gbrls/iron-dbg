@@ -735,6 +735,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "from-mi-derive"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
 name = "futures-core"
 version = "0.3.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -952,6 +961,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "eframe",
+ "from-mi-derive",
  "nom",
  "snailquote",
  "static_init",

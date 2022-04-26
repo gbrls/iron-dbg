@@ -19,7 +19,7 @@ use tokio::{
 
 mod control;
 mod mi;
-mod parser;
+mod mi_parse;
 
 use crate::control::{ControlState, InputCommand};
 
