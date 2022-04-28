@@ -1,16 +1,17 @@
 use anyhow::anyhow;
 use nom::branch::alt;
-use nom::bytes::complete::{tag, take_while};
+use nom::bytes::complete::{tag, take_till, take_while};
 use nom::character::complete::char;
 use nom::character::is_digit;
 use nom::combinator::{map, map_res, opt};
 use nom::error::ErrorKind;
 use nom::multi::{many0, many_till};
-use nom::sequence::{delimited, preceded, terminated};
+use nom::sequence::{delimited, preceded, terminated, tuple};
 use nom::{Err, IResult, Parser};
 use snailquote::unescape;
 
 use crate::mi_parse;
+use crate::mi_types::*;
 use from_mi_derive::FromMI;
 
 trait FromMI {
@@ -98,13 +99,14 @@ pub enum Output {
     /// # **Symbol**: `*`  
     /// asynchronous state change on the target (stopped, started, disappeared).  
     /// Docs: https://sourceware.org/gdb/onlinedocs/gdb/GDB_002fMI-Async-Records.html
-    ExecAsync {
-        state: Option<ExecutionState>,
-        rest: mi_parse::MIRepr,
-    },
+    //ExecAsync {
+    //    state: Option<ExecutionState>,
+    //    rest: mi_parse::MIRepr,
+    //},
+    ExecAsync(ExecutionState, mi_parse::MIRepr), // @TODO: We should parse the first as MIResult or similar
     /// # **Symbol**: `=`  
     /// supplementary information that the client should handle (e.g., a new breakpoint information).
-    NotifyAsync,
+    NotifyAsync(String, mi_parse::MIRepr),
     /// # **Symbol**: `~`  
     /// should be displayed as is in the console. It is the textual response to a CLI command.
     ConsoleStream(String),
@@ -116,200 +118,52 @@ pub enum Output {
     LogStream(String),
     /// # **Symbol**: `^`  
     /// No doc from GDB MI
-    ResultRecord(MIResult),
+    ResultRecord(MIResult, Option<mi_parse::MIRepr>),
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub enum MIResult {
-    Done,
-    Running,
-    Connected,
-    Error { msg: String, code: Option<String> },
-    Exit,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum AsyncStateStatus {
-    Running {
-        thread: String,
-    },
-    Stopped {
-        reason: StoppedReason,
-        frame: Option<Frame>,
-        thread: String,
-        stopped_threads: String,
-        core: String,
-    },
-}
-
-/// [docs](https://sourceware.org/gdb/onlinedocs/gdb/GDB_002fMI-Async-Records.html#GDB_002fMI-Async-Records)
-#[derive(Debug, Clone, PartialEq)]
-pub enum AsyncInfo {
-    ThreadGroupAdded {
-        id: String,
-    },
-    ThreadGroupRemoved {
-        id: String,
-    },
-    ThreadGroupStarted {
-        id: String,
-        pid: String,
-    },
-    ThreadGroupExited {
-        id: String,
-        exit_code: Option<String>,
-    },
-    ThreadCreated {
-        id: String,
-        group_id: String,
-    },
-    ThreadExited {
-        id: String,
-        group_id: String,
-    },
-    ThreadSelected {
-        id: String,
-        frame: Option<Frame>,
-    },
-    LibraryLoaded {
-        id: String,
-        target_name: String,
-        host_name: String,
-        symbols_loaded: String,
-        ranges: String,
-        thread_group: Option<String>,
-    },
-    LibraryUnloaded {
-        id: String,
-        target_name: String,
-        host_name: String,
-        thread_group: Option<String>,
-    },
-    /// Either:
-    /// =traceframe-changed,num=tfnum,tracepoint=tpnum
-    /// =traceframe-changed,end
-    TraceframeChanged {
-        num: Option<String>,
-        tracepoint: Option<String>,
-    },
-    TSVCreated {
-        name: String,
-        initial: String,
-    },
-    TSVDeleted {
-        name: Option<String>,
-    },
-    TSVModified {
-        name: String,
-        initial: String,
-        current: Option<String>,
-    },
-    BreakpointCreated {
-        bkpt: Breakpoint,
-    },
-    BreakpointModified {
-        bkpt: Breakpoint,
-    },
-    BreakpointDeleted {
-        id: String,
-    },
-    RecordStarted {
-        thread_group: String,
-        method: String,
-        format: Option<String>,
-    },
-    RecordStopped {
-        thread_group: String,
-    },
-    CmdParamChanged {
-        param: String,
-        value: String,
-    },
-    MemoryChanged {
-        thread_group: String,
-        addr: u64,
-        len: u32,
-        m_type: Option<String>,
-    },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum StoppedReason {
-    BreakpointHit,
-    WatchpointTrigger,
-    AccessWatchpointTrigger,
-    FunctionFinished,
-    LocationReached,
-    WatchPointScope,
-    EndSteppingRange,
-    ExitSignalled,
-    Exited,
-    ExitedNormally,
-    SignalReceived,
-    SolibEvent,
-    Fork,
-    VFork,
-    SyscallEntry,
-    SyscallReturn,
-    Exec,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum ExecutionState {
-    Done,
-    Running,
-    Connected,
-    Error { msg: String },
-    Exit,
-    Stopped,
-}
-
-/// [docs](https://sourceware.org/gdb/onlinedocs/gdb/GDB_002fMI-Frame-Information.html#GDB_002fMI-Frame-Information)
-#[derive(Debug, Clone, PartialEq, FromMI)]
-#[name = "frame"]
-pub struct Frame {
-    #[name = "addr"]
-    addr: u64,
-    #[name = "func"]
-    func: String,
-    args: Vec<String>,
-    file: String,
-    fullname: String,
-    line: u32,
-    arch: String,
-    /// GDB's docs say this field is present, but I don't see it.
-    level: Option<String>,
-}
-
-/// [docs](https://sourceware.org/gdb/onlinedocs/gdb/GDB_002fMI-Breakpoint-Information.html#GDB_002fMI-Breakpoint-Information)
-#[derive(Debug, Clone, PartialEq)]
-pub struct Breakpoint {
-    number: String,
-    b_type: String,
-    disp: String,
-    enabled: bool,
-    addr: u64,
-    func: String,
-    file: String,
-    fullname: String,
-    line: u32,
-    thread_groups: Vec<String>,
-    times: String,
-}
-
-//Thread docs
-// https://sourceware.org/gdb/onlinedocs/gdb/GDB_002fMI-Thread-Information.html#GDB_002fMI-Thread-Information
-
-pub fn parse(input: &str) -> IResult<&str, Output> {
+pub fn parse_stream(input: &str) -> IResult<&str, Output> {
     use nom::combinator::map;
     let (rest, out) = alt((
-        map(tag("="), |_| Output::NotifyAsync),
+        map(
+            preceded(
+                char('='),
+                tuple((take_till(|c: char| c == ','), char(','), mi_parse::mi_repr)),
+            ),
+            |(msg_kind, _, repr): (&str, char, mi_parse::MIRepr)| {
+                Output::NotifyAsync(msg_kind.into(), repr)
+            },
+        ),
+        map(
+            preceded(
+                char('*'),
+                tuple((execution_state, char(','), mi_parse::mi_repr)),
+            ),
+            |(state, _, repr): (_, char, _)| Output::ExecAsync(state, repr),
+        ),
         // Stream records
         map(preceded(tag("~"), owned_unescaped), Output::ConsoleStream),
         map(preceded(tag("@"), owned_unescaped), Output::TargetStream),
         map(preceded(tag("&"), owned_unescaped), Output::LogStream),
         // ResultRecord
-        map(preceded(tag("^"), mi_result), Output::ResultRecord),
+        map(
+            preceded(
+                tag("^"),
+                tuple((mi_result, opt(char(',')), opt(mi_parse::mi_repr))),
+            ),
+            |(result, _, repr)| Output::ResultRecord(result, repr),
+        ),
+    ))(input)?;
+
+    Ok((rest, out))
+}
+
+fn execution_state(input: &str) -> IResult<&str, ExecutionState> {
+    let (rest, out) = alt((
+        map(tag("done"), |_| ExecutionState::Done),
+        map(tag("stopped"), |_| ExecutionState::Stopped),
+        map(tag("running"), |_| ExecutionState::Running),
+        map(tag("error"), |_| ExecutionState::Error),
+        map(tag("exit"), |_| ExecutionState::Exit),
     ))(input)?;
 
     Ok((rest, out))
@@ -358,22 +212,17 @@ fn message(input: &str) -> IResult<&str, (&str, Option<&str>)> {
 }
 
 fn owned_unescaped(input: &str) -> IResult<&str, String> {
-    //let (rest, s) = delimited(char('\"'), take_while(|c| c != '\"'), char('\"'))(input)?;
-
-    //Ok((rest, unescape(s).unwrap()))
-    //TODO: this doesn't return the correct rest
-    Ok((input, unescape(input).unwrap()))
+    Ok(("", unescape(input).unwrap()))
 }
 
 fn c_str(input: &str) -> IResult<&str, &str> {
     let (rest, s) = delimited(char('\"'), take_while(|c| c != '\"'), char('\"'))(input)?;
 
-    //Ok((rest, &unescape(s).unwrap()))
     Ok((rest, s))
 }
 
 pub fn user_output(src: &str) -> Option<String> {
-    let p = parse(src);
+    let p = parse_stream(src);
 
     if let Ok((_, Output::ConsoleStream(src))) = p {
         let src = if src.ends_with('\n') {
@@ -408,16 +257,8 @@ mod tests {
     #[test]
     fn test_parse() {
         assert_eq!(
-            parse("^done").unwrap().1,
-            Output::ResultRecord(MIResult::Done)
-        );
-
-        assert_eq!(
-            parse("^error,msg=\"Alguma mensagem de erro\"").unwrap().1,
-            Output::ResultRecord(MIResult::Error {
-                msg: "Alguma mensagem de erro".to_string(),
-                code: None
-            }),
+            parse_stream("^done").unwrap().1,
+            Output::ResultRecord(MIResult::Done, None)
         );
     }
 
@@ -453,5 +294,14 @@ mod tests {
         };
 
         Frame::print_fields();
+    }
+
+    #[test]
+    fn test_async_exec() {
+        println!("{:?}", execution_state(r#"running,thread..."#).unwrap());
+        println!(
+            "{:?}",
+            parse_stream(r#"*running,thread-id="all""#).unwrap().1
+        );
     }
 }

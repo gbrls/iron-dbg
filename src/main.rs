@@ -20,6 +20,8 @@ use tokio::{
 mod control;
 mod mi;
 mod mi_parse;
+mod mi_types;
+mod query;
 
 use crate::control::{ControlState, InputCommand};
 
@@ -82,6 +84,7 @@ impl MyApp {
         let gdb_state_hist_console = gdb_state_hist.clone();
 
         let consume_console_handle = tokio::spawn(async move {
+            // @TODO: There's sometimes a big delay to receive the output that comes out of the console.
             while let Some(cmd) = receiver.recv().await {
                 let mut console_out = reader_console_handle.lock().unwrap();
 
@@ -224,18 +227,18 @@ impl eframe::epi::App for MyApp {
                     });
 
                     ui.separator();
-                    ui.label("State history");
-
-                    egui::ScrollArea::vertical()
-                        .max_height(f32::INFINITY)
-                        .max_width(f32::INFINITY)
-                        .stick_to_bottom()
-                        .auto_shrink([true, true])
-                        .show(ui, |ui| {
-                            for s in history.stored {
-                                ui.monospace(format!("{s:?}"));
-                            }
-                        });
+                    ui.collapsing("State history", |ui| {
+                        egui::ScrollArea::vertical()
+                            .max_height(f32::INFINITY)
+                            .max_width(f32::INFINITY)
+                            .stick_to_bottom()
+                            .auto_shrink([true, true])
+                            .show(ui, |ui| {
+                                for s in history.stored {
+                                    ui.monospace(format!("{s:?}"));
+                                }
+                            });
+                    });
                 });
 
             ui.collapsing("Console", |ui| {

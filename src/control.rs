@@ -1,15 +1,19 @@
-use crate::mi;
 use crate::Arc;
 use crate::ConsoleOutput;
 use crate::ControlState::{AttachFileDialog, SendCommand};
+use crate::{mi, query};
 use snailquote::unescape;
 use std::cell::RefCell;
 use std::fmt;
 use std::fmt::{write, Formatter};
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-use crate::mi::{parse, ExecutionState, Output};
+use crate::mi::{parse_stream, Output};
+use crate::mi_types;
 use static_init::dynamic;
+
+const START_COMMANDS: &[&'static str] = &["set disassembly-flavor intel"];
 
 /// We need to keep track of the commands we sent to the shell to be able to backtrack errors and
 /// restart a shell and go back to a known state
@@ -59,6 +63,8 @@ pub enum ControlState {
 
     GDBRunning {
         state: GDBExecutionState,
+        line: Option<u32>,
+        file: Option<PathBuf>,
         last_output: Option<mi::Output>,
     },
 
@@ -95,12 +101,9 @@ pub enum GDBExecutionState {
 
 fn execution_state_from_output(cur: &GDBExecutionState, output: &mi::Output) -> GDBExecutionState {
     match output {
-        mi::Output::ExecAsync { state: Some(s), .. } => match s {
-            ExecutionState::Running | ExecutionState::Connected => GDBExecutionState::Running,
-            ExecutionState::Stopped => GDBExecutionState::Stopped,
-            _ => GDBExecutionState::Unknown,
-        },
-        _ => *cur,
+        mi::Output::ExecAsync(mi_types::ExecutionState::Running, _) => GDBExecutionState::Running,
+        mi::Output::ExecAsync(mi_types::ExecutionState::Stopped, _) => GDBExecutionState::Stopped,
+        _ => GDBExecutionState::Unknown,
     }
 }
 
@@ -128,12 +131,29 @@ impl ControlState {
                 host: Some(str_in[0].clone()),
             })],
 
-            GDBRunning { .. } => &[("Reload", |prev, _| RestartAndRecover {
-                sent: false,
-                prev: Box::new(prev.clone()),
-            })],
+            GDBRunning { .. } => &[
+                ("Reload", |prev, _| RestartAndRecover {
+                    sent: false,
+                    prev: Box::new(prev.clone()),
+                }),
+                ("Step", |_, _| {
+                    ControlState::send_commands(
+                        &["-exec-step"],
+                        ControlState::no_stderr(ControlState::running_default()),
+                    )
+                }),
+            ],
 
             _ => &[],
+        }
+    }
+
+    fn running_default() -> ControlState {
+        ControlState::GDBRunning {
+            state: GDBExecutionState::Unknown,
+            line: None,
+            file: None,
+            last_output: None,
         }
     }
 
@@ -147,7 +167,7 @@ impl ControlState {
         }
     }
 
-    // @TODO: handle GDB errors here from the STDOUT
+    // @TODO: handle GDB errors here from the STDOUT... maybe not HERE, but somewhere else
     fn no_stderr(next: ControlState) -> impl Fn(ControlState, ConsoleOutput) -> ControlState {
         move |state, input| match input {
             ConsoleOutput::Stdout(_) => next.clone(),
@@ -195,10 +215,10 @@ pub fn advance_cmds(state: &ControlState) -> (ControlState, Vec<String>) {
         AttachFileDialog { path: Some(p) } => (
             ControlState::send_commands(
                 &[&format!("file {p}"), "start"],
-                ControlState::no_stderr(GDBRunning {
-                    state: GDBExecutionState::Unknown,
-                    last_output: None,
-                }),
+                ControlState::no_stderr(ControlState::send_commands(
+                    START_COMMANDS,
+                    ControlState::no_stderr(ControlState::running_default()),
+                )),
             ),
             vec![],
         ),
@@ -206,10 +226,10 @@ pub fn advance_cmds(state: &ControlState) -> (ControlState, Vec<String>) {
         TryAttachPort { host: Some(h) } => (
             ControlState::send_commands(
                 &[&format!("target remote {h}")],
-                ControlState::no_stderr(GDBRunning {
-                    state: GDBExecutionState::Unknown,
-                    last_output: None,
-                }),
+                ControlState::no_stderr(ControlState::send_commands(
+                    START_COMMANDS,
+                    ControlState::no_stderr(ControlState::running_default()),
+                )),
             ),
             vec![],
         ),
@@ -259,22 +279,31 @@ pub fn read_console_input(state: ControlState, input: &ConsoleOutput) -> Control
         } => verify(state.clone(), input.clone()),
 
         GDBRunning {
-            state: s,
-            last_output: last,
+            state,
+            last_output,
+            line,
+            file,
         } => match input {
             Stdout(input) => {
-                let output = mi::parse(input);
-                GDBRunning {
-                    state: if output.is_ok() {
-                        execution_state_from_output(&s, &output.as_ref().unwrap().1)
-                    } else {
-                        s
-                    },
-                    last_output: if output.is_ok() {
-                        Some(output.unwrap().1)
-                    } else {
-                        last
-                    },
+                if let Ok((_, ref output)) = mi::parse_stream(input) {
+                    let next_state = execution_state_from_output(&state, output);
+                    GDBRunning {
+                        state: if next_state != GDBExecutionState::Unknown {
+                            next_state
+                        } else {
+                            state
+                        },
+                        last_output: Some(output.clone()),
+                        line: query::current_line(output),
+                        file: query::current_file(output),
+                    }
+                } else {
+                    GDBRunning {
+                        state,
+                        last_output,
+                        line,
+                        file,
+                    }
                 }
             }
             Stderr(e) => panic!("{}", e),

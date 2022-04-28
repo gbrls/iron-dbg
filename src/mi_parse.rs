@@ -25,16 +25,16 @@ pub enum MIRepr {
 /// This function parses data from GDB such as reason="idk",frame={...}
 /// but it doesn't parse the first two tokens that come from GDB
 /// such as ^done or *stopped
-pub fn parse(input: &str) -> IResult<&str, MIRepr> {
-    todo!()
+pub fn mi_repr(input: &str) -> IResult<&str, MIRepr> {
+    alt((map, array))(input)
 }
 
 fn name(input: &str) -> IResult<&str, String> {
     let (rest, lit) = terminated(
-        take_while1(|c: char| c != '=' && c.is_alphanumeric()),
-        //take_till1(|c: char| c == '='),
+        take_while1(|c: char| c != '=' && (c.is_alphanumeric() || c == '-')),
         char('='),
     )(input)?;
+
     Ok((rest, lit.into()))
 }
 
@@ -99,5 +99,8 @@ mod tests {
             map(r#"brkpt=[{reason="breakpoint-hit",line="4"},{reason="breakpoint-hit",line="8"}]"#)
                 .unwrap();
         println!("{v:?}");
+
+        let (rest, v) = map(r#"thread-id="all""#).unwrap();
+        println!("{v:?}, rest {rest}");
     }
 }
