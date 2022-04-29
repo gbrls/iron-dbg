@@ -1,5 +1,5 @@
-use crate::mi;
 use crate::mi_parse::MIRepr;
+use crate::{mi, mi_types};
 use std::path::{Path, PathBuf};
 
 /// We are using a data oriented programming approach here,
@@ -40,13 +40,7 @@ pub fn current_line(input: &mi::Output) -> Option<u32> {
 
     let line_path = &["frame", "line"];
 
-    get(&repr, line_path).and_then(|x| {
-        if let MIRepr::Literal(s) = x {
-            Some(s.parse::<u32>().unwrap())
-        } else {
-            panic!("Expected lines literal");
-        }
-    })
+    get(&repr, line_path).and_then(|x| Some(x.to_u32()))
 }
 
 pub fn current_file(input: &mi::Output) -> Option<PathBuf> {
@@ -59,13 +53,55 @@ pub fn current_file(input: &mi::Output) -> Option<PathBuf> {
 
     let line_path = &["frame", "fullname"];
 
-    get(&repr, line_path).and_then(|x| {
-        if let MIRepr::Literal(s) = x {
-            Some(PathBuf::from(&s))
-        } else {
-            panic!("Expected lines literal");
-        }
+    get(&repr, line_path).and_then(|x| Some(PathBuf::from(x.to_string())))
+}
+
+pub fn frames_from_repr(repr: &MIRepr) -> Option<Vec<mi_types::Frame>> {
+    get(&repr, &["stack"]).and_then(|repr| match repr {
+        MIRepr::Array(v) => match &v[0] {
+            MIRepr::Array(v) => Some(
+                v.into_iter()
+                    .map(|x| frame_from_repr(&x).unwrap())
+                    .collect(),
+            ),
+            _ => None,
+        },
+        _ => None,
     })
+}
+
+pub fn frames(input: &mi::Output) -> Option<Vec<mi_types::Frame>> {
+    let repr = mi_repr(input);
+    if repr.is_none() {
+        return None;
+    }
+
+    let repr = repr.unwrap();
+    frames_from_repr(&repr)
+}
+
+fn frame_from_repr(repr: &MIRepr) -> Option<mi_types::Frame> {
+    get(&repr, &["frame"]).and_then(|frame| {
+        let func = get(&frame, &["func"]).unwrap().to_string();
+        let level = get(&frame, &["level"]).unwrap().to_u32();
+
+        Some(mi_types::Frame {
+            func,
+            level,
+            args: None,
+        })
+    })
+}
+
+pub fn frame(input: &mi::Output) -> Option<mi_types::Frame> {
+    let repr = mi_repr(input);
+    if repr.is_none() {
+        return None;
+    }
+
+    let repr = repr.unwrap();
+
+    frame_from_repr(&repr)
 }
 
 #[cfg(test)]
@@ -82,5 +118,14 @@ mod tests {
             get(&v, &["brkpt", "line"]),
             Some(MIRepr::Literal(String::from("4")))
         );
+    }
+
+    #[test]
+    fn test_frames() {
+        let v = mi_parse::mi_repr(
+            r#"stack=[frame={level="0",addr="0x000000000040115a",func="fib",file="example.c",fullname="/home/gbrls/Programming/iron-dbg/res/example.c",line="10",arch="i386:x86-64"},frame={level="1",addr="0x0000000000401167",func="fib",file="example.c",fullname="/home/gbrls/Programming/iron-dbg/res/example.c",line="10",arch="i386:x86-64"},frame={level="2",addr="0x0000000000401167",func="fib",file="example.c",fullname="/home/gbrls/Programming/iron-dbg/res/example.c",line="10",arch="i386:x86-64"},frame={level="3",addr="0x0000000000401167",func="fib",file="example.c",fullname="/home/gbrls/Programming/iron-dbg/res/example.c",line="10",arch="i386:x86-64"},frame={level="4",addr="0x000000000040119a",func="main",file="example.c",fullname="/home/gbrls/Programming/iron-dbg/res/example.c",line="15",arch="i386:x86-64"}]"#,
+        ).unwrap().1;
+
+        println!("{:?}", frames_from_repr(&v));
     }
 }

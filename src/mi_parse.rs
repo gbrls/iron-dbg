@@ -22,6 +22,21 @@ pub enum MIRepr {
     Literal(String),
 }
 
+impl MIRepr {
+    pub fn to_u32(&self) -> u32 {
+        match self {
+            MIRepr::Literal(s) => s.parse::<u32>().unwrap(),
+            _ => panic!("not number literal"),
+        }
+    }
+
+    pub fn to_string(&self) -> String {
+        match self {
+            MIRepr::Literal(s) => s.clone(),
+            _ => panic!("not literal"),
+        }
+    }
+}
 /// This function parses data from GDB such as reason="idk",frame={...}
 /// but it doesn't parse the first two tokens that come from GDB
 /// such as ^done or *stopped
@@ -55,19 +70,36 @@ fn map(input: &str) -> IResult<&str, MIRepr> {
         ),
     ))(input)?;
 
+    // Sometimes we are not sure if it's a map or an array, if we parse an array as a map we'll lose
+    // information, so here we need to fix this
+
     let mut mp = HashMap::new();
+    let mut arr = Vec::new();
+    let mut is_array = false;
 
     for (k, v) in v.into_iter() {
-        mp.insert(k, v);
+        if mp.contains_key(&k) {
+            is_array = true;
+        }
+
+        mp.insert(k.clone(), v.clone());
+
+        let mut kv = HashMap::new();
+        kv.insert(k, v);
+        arr.push(Map(kv));
     }
 
-    Ok((rest, Map(mp)))
+    if is_array {
+        Ok((rest, Array(arr)))
+    } else {
+        Ok((rest, Map(mp)))
+    }
 }
 
 fn array(input: &str) -> IResult<&str, MIRepr> {
     let (rest, vals) = delimited(
         char('['),
-        separated_list0(char(','), alt((map, array, literal))),
+        separated_list0(char(','), alt((array, literal, map))),
         char(']'),
     )(input)?;
 
@@ -102,5 +134,12 @@ mod tests {
 
         let (rest, v) = map(r#"thread-id="all""#).unwrap();
         println!("{v:?}, rest {rest}");
+    }
+
+    #[test]
+    fn test_stack_list_frames() {
+        let s = r#"stack=[frame={level="0",addr="0x000000000040114f",func="fib",file="example.c",fullname="/home/gbrls/Programming/iron-dbg/res/example.c",line="8",arch="i386:x86-64"},frame={level="1",addr="0x0000000000401167",func="fib",file="example.c",fullname="/home/gbrls/Programming/iron-dbg/res/example.c",line="10",arch="i386:x86-64"},frame={level="2",addr="0x0000000000401167",func="fib",file="example.c",fullname="/home/gbrls/Programming/iron-dbg/res/example.c",line="10",arch="i386:x86-64"},frame={level="3",addr="0x0000000000401167",func="fib",file="example.c",fullname="/home/gbrls/Programming/iron-dbg/res/example.c",line="10",arch="i386:x86-64"},frame={level="4",addr="0x000000000040119a",func="main",file="example.c",fullname="/home/gbrls/Programming/iron-dbg/res/example.c",line="15",arch="i386:x86-64"}]"#;
+        let (_, v) = mi_repr(s).unwrap();
+        println!("{v:#?}");
     }
 }

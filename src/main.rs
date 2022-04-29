@@ -22,6 +22,7 @@ mod mi;
 mod mi_parse;
 mod mi_types;
 mod query;
+mod ui;
 
 use crate::control::{ControlState, InputCommand};
 
@@ -275,6 +276,9 @@ impl eframe::epi::App for MyApp {
                     }
                 });
             });
+
+            ui::current_file(ui, &cur_state);
+            ui::stack_frame(ui, &cur_state);
         });
 
         //if buttons.iter().any(|x| *x) {

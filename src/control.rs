@@ -63,8 +63,12 @@ pub enum ControlState {
 
     GDBRunning {
         state: GDBExecutionState,
+        // TODO: these variables such as line, file, etc shouldn't
+        // have the same lifetime as the ControlState because they outlive
+        // them.
         line: Option<u32>,
         file: Option<PathBuf>,
+        frames: Option<Vec<mi_types::Frame>>,
         last_output: Option<mi::Output>,
     },
 
@@ -142,6 +146,12 @@ impl ControlState {
                         ControlState::no_stderr(ControlState::running_default()),
                     )
                 }),
+                ("List frames", |_, _| {
+                    ControlState::send_commands(
+                        &["-stack-list-frames"],
+                        ControlState::no_stderr(ControlState::running_default()),
+                    )
+                }),
             ],
 
             _ => &[],
@@ -153,6 +163,7 @@ impl ControlState {
             state: GDBExecutionState::Unknown,
             line: None,
             file: None,
+            frames: None,
             last_output: None,
         }
     }
@@ -276,13 +287,17 @@ pub fn read_console_input(state: ControlState, input: &ConsoleOutput) -> Control
             check: BoxedFn(ref verify),
             sent: true,
             ..
-        } => verify(state.clone(), input.clone()),
+        } => {
+            let next = verify(state.clone(), input.clone());
+            read_console_input(next, input)
+        }
 
         GDBRunning {
             state,
             last_output,
             line,
             file,
+            frames,
         } => match input {
             Stdout(input) => {
                 if let Ok((_, ref output)) = mi::parse_stream(input) {
@@ -294,8 +309,10 @@ pub fn read_console_input(state: ControlState, input: &ConsoleOutput) -> Control
                             state
                         },
                         last_output: Some(output.clone()),
-                        line: query::current_line(output),
-                        file: query::current_file(output),
+                        line: query::current_line(output).or(line),
+                        file: query::current_file(output).or(file),
+                        frames: query::frames(output).or(frames),
+                        //frames,
                     }
                 } else {
                     GDBRunning {
@@ -303,6 +320,7 @@ pub fn read_console_input(state: ControlState, input: &ConsoleOutput) -> Control
                         last_output,
                         line,
                         file,
+                        frames,
                     }
                 }
             }

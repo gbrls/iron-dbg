@@ -283,14 +283,14 @@ mod tests {
     #[test]
     fn test_from_mi_macro() {
         let f = Frame {
-            addr: 42,
+            //addr: 42,
             func: "jjjj".to_string(),
-            args: vec![],
-            file: "sla".to_string(),
-            fullname: "idk".to_string(),
-            line: 69,
-            arch: "aaa".to_string(),
-            level: None,
+            args: Some(vec![]),
+            //file: "sla".to_string(),
+            //fullname: "idk".to_string(),
+            //line: 69,
+            //arch: "aaa".to_string(),
+            level: 5,
         };
 
         Frame::print_fields();

@@ -149,17 +149,17 @@ pub enum StoppedReason {
 #[derive(Debug, Clone, PartialEq, FromMI)]
 #[name = "frame"]
 pub struct Frame {
-    #[name = "addr"]
-    pub addr: u64,
+    // #[name = "addr"]
+    // pub addr: u64,
     #[name = "func"]
     pub func: String,
-    pub args: Vec<String>,
-    pub file: String,
-    pub fullname: String,
-    pub line: u32,
-    pub arch: String,
+    pub args: Option<Vec<(String, String)>>,
+    //pub file: String,
+    //pub fullname: String,
+    //pub line: u32,
+    //pub arch: String,
     /// GDB's docs say this field is present, but I don't see it.
-    pub level: Option<String>,
+    pub level: u32,
 }
 
 /// [docs](https://sourceware.org/gdb/onlinedocs/gdb/GDB_002fMI-Breakpoint-Information.html#GDB_002fMI-Breakpoint-Information)
