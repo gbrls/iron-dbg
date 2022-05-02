@@ -153,7 +153,7 @@ pub struct Frame {
     // pub addr: u64,
     #[name = "func"]
     pub func: String,
-    pub args: Option<Vec<(String, String)>>,
+    pub args: Option<Vec<(String, String, String)>>,
     //pub file: String,
     //pub fullname: String,
     //pub line: u32,

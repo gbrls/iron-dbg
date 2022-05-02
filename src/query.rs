@@ -80,6 +80,7 @@ pub fn frames(input: &mi::Output) -> Option<Vec<mi_types::Frame>> {
     frames_from_repr(&repr)
 }
 
+/// Querying the output of -stack-list-frames
 fn frame_from_repr(repr: &MIRepr) -> Option<mi_types::Frame> {
     get(&repr, &["frame"]).and_then(|frame| {
         let func = get(&frame, &["func"]).unwrap().to_string();
@@ -93,6 +94,16 @@ fn frame_from_repr(repr: &MIRepr) -> Option<mi_types::Frame> {
     })
 }
 
+/// Querying the output of -stack-list-arguments 2
+pub fn frame_args_from_repr(repr: &MIRepr) -> Option<Vec<(String, String, String)>> {
+    get(&repr, &["stack-args"]).and_then(|frames| {
+        match frames {
+            MIRepr::Array(f) => None,
+            _ => None,
+        }
+    })
+}
+
 pub fn frame(input: &mi::Output) -> Option<mi_types::Frame> {
     let repr = mi_repr(input);
     if repr.is_none() {
@@ -102,6 +113,22 @@ pub fn frame(input: &mi::Output) -> Option<mi_types::Frame> {
     let repr = repr.unwrap();
 
     frame_from_repr(&repr)
+}
+
+pub fn has_exited(input: &mi::Output) -> bool {
+    match input {
+        mi::Output::ExecAsync(state, repr) => match get(repr, &["reason"]) {
+            Some(r) => {
+                if let MIRepr::Literal(s) = r {
+                    s == "exited-normally"
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        },
+        _ => false,
+    }
 }
 
 #[cfg(test)]
@@ -127,5 +154,14 @@ mod tests {
         ).unwrap().1;
 
         println!("{:?}", frames_from_repr(&v));
+    }
+
+    #[test]
+    fn test_frame_args() {
+        let v = mi_parse::mi_repr(r#"stack-args=[frame={level="0",args=[{name="a",type="int",value="1"}]},frame={level="1",args=[{name="a",type="int",value="2"}]},frame={level="2",args=[{name="a",type="int",value="3"}]},frame={level="3",args=[{name="a",type="int",value="4"}]},frame={level="4",args=[{name="a",type="int",value="5"}]},frame={level="5",args=[]}]"#)
+            .unwrap()
+            .1;
+
+        println!("{v:#?}");
     }
 }

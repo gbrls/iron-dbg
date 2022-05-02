@@ -1,3 +1,4 @@
+use crate::mi_parse::MIRepr;
 use crate::Arc;
 use crate::ConsoleOutput;
 use crate::ControlState::{AttachFileDialog, SendCommand};
@@ -14,6 +15,7 @@ use crate::mi_types;
 use static_init::dynamic;
 
 const START_COMMANDS: &[&'static str] = &["set disassembly-flavor intel"];
+const STEP_COMMANDS: &[&'static str] = &["-exec-step", "-stack-list-frames"];
 
 /// We need to keep track of the commands we sent to the shell to be able to backtrack errors and
 /// restart a shell and go back to a known state
@@ -48,6 +50,13 @@ impl BoxedFn {
     }
 }
 
+#[derive(Clone, PartialEq, Debug, Default)]
+pub struct PersistentData {
+    pub line: Option<u32>,
+    pub file: Option<PathBuf>,
+    pub frames: Option<Vec<mi_types::Frame>>,
+}
+
 #[derive(Clone, PartialEq, Debug)]
 pub enum ControlState {
     LookingForGDB,
@@ -63,12 +72,6 @@ pub enum ControlState {
 
     GDBRunning {
         state: GDBExecutionState,
-        // TODO: these variables such as line, file, etc shouldn't
-        // have the same lifetime as the ControlState because they outlive
-        // them.
-        line: Option<u32>,
-        file: Option<PathBuf>,
-        frames: Option<Vec<mi_types::Frame>>,
         last_output: Option<mi::Output>,
     },
 
@@ -82,6 +85,8 @@ pub enum ControlState {
         sent: bool,
         prev: Box<ControlState>,
     },
+
+    GDBExited,
 }
 
 impl fmt::Debug for BoxedFn {
@@ -142,16 +147,22 @@ impl ControlState {
                 }),
                 ("Step", |_, _| {
                     ControlState::send_commands(
-                        &["-exec-step"],
+                        &STEP_COMMANDS,
                         ControlState::no_stderr(ControlState::running_default()),
                     )
                 }),
-                ("List frames", |_, _| {
+                ("Continue", |_, _| {
                     ControlState::send_commands(
-                        &["-stack-list-frames"],
+                        &["-exec-continue"],
                         ControlState::no_stderr(ControlState::running_default()),
                     )
                 }),
+                //("List frames", |_, _| {
+                //    ControlState::send_commands(
+                //        &["-stack-list-frames"],
+                //        ControlState::no_stderr(ControlState::running_default()),
+                //    )
+                //}),
             ],
 
             _ => &[],
@@ -161,9 +172,6 @@ impl ControlState {
     fn running_default() -> ControlState {
         ControlState::GDBRunning {
             state: GDBExecutionState::Unknown,
-            line: None,
-            file: None,
-            frames: None,
             last_output: None,
         }
     }
@@ -274,11 +282,16 @@ pub fn advance_cmds(state: &ControlState) -> (ControlState, Vec<String>) {
 
             (*(*prev).clone(), cmds)
         },
+        GDBExited => (GDBNothingLoaded, vec![]),
         _ => (state.clone(), vec![]),
     }
 }
 
-pub fn read_console_input(state: ControlState, input: &ConsoleOutput) -> ControlState {
+pub fn read_console_input(
+    state: ControlState,
+    data: &mut PersistentData,
+    input: &ConsoleOutput,
+) -> ControlState {
     use ConsoleOutput::*;
     use ControlState::*;
 
@@ -289,19 +302,21 @@ pub fn read_console_input(state: ControlState, input: &ConsoleOutput) -> Control
             ..
         } => {
             let next = verify(state.clone(), input.clone());
-            read_console_input(next, input)
+            read_console_input(next, data, input)
         }
 
-        GDBRunning {
-            state,
-            last_output,
-            line,
-            file,
-            frames,
-        } => match input {
+        GDBRunning { state, last_output } => match input {
             Stdout(input) => {
                 if let Ok((_, ref output)) = mi::parse_stream(input) {
+                    *data = update_persistent_data(&output, &data);
                     let next_state = execution_state_from_output(&state, output);
+
+                    let exited = query::has_exited(output);
+
+                    if exited {
+                        return GDBExited;
+                    }
+
                     GDBRunning {
                         state: if next_state != GDBExecutionState::Unknown {
                             next_state
@@ -309,24 +324,26 @@ pub fn read_console_input(state: ControlState, input: &ConsoleOutput) -> Control
                             state
                         },
                         last_output: Some(output.clone()),
-                        line: query::current_line(output).or(line),
-                        file: query::current_file(output).or(file),
-                        frames: query::frames(output).or(frames),
-                        //frames,
                     }
                 } else {
-                    GDBRunning {
-                        state,
-                        last_output,
-                        line,
-                        file,
-                        frames,
-                    }
+                    GDBRunning { state, last_output }
                 }
             }
             Stderr(e) => panic!("{}", e),
         },
 
         _ => state,
+    }
+}
+
+fn update_persistent_data(output: &Output, persistent_data: &PersistentData) -> PersistentData {
+    match persistent_data {
+        PersistentData { line, file, frames } => PersistentData {
+            line: query::current_line(output).or(line.clone()),
+            file: query::current_file(output).or(file.clone()),
+            frames: query::frames(output).or(frames.clone()),
+            // @TODO: Fill the frame fields with another query
+            //frames: query::frames(output).or(frames.clone()).and_then(..),
+        },
     }
 }

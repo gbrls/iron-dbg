@@ -1,3 +1,4 @@
+use control::PersistentData;
 use eframe::egui;
 use eframe::egui::TextStyle;
 use eframe::epaint::Vec2;
@@ -67,6 +68,7 @@ struct MyApp {
     console_output: Arc<Mutex<String>>,
     input_fields: Vec<String>,
     gdb_state: Arc<Mutex<control::ControlState>>,
+    persistent_data: Arc<Mutex<PersistentData>>,
     state_history: Arc<Mutex<History<control::ControlState>>>,
 }
 
@@ -84,6 +86,9 @@ impl MyApp {
         let gdb_state_hist = Arc::new(Mutex::new(History::new()));
         let gdb_state_hist_console = gdb_state_hist.clone();
 
+        let persistent_data = Arc::new(Mutex::new(PersistentData::default()));
+        let p_data_handle = persistent_data.clone();
+
         let consume_console_handle = tokio::spawn(async move {
             // @TODO: There's sometimes a big delay to receive the output that comes out of the console.
             while let Some(cmd) = receiver.recv().await {
@@ -94,7 +99,10 @@ impl MyApp {
                     s
                 };
 
-                let next_state = control::read_console_input(cur_state, &cmd);
+                let next_state = {
+                    let mut d = p_data_handle.lock().unwrap();
+                    control::read_console_input(cur_state, &mut (*d), &cmd)
+                };
 
                 {
                     gdb_state_hist_console.lock().unwrap().update(&next_state);
@@ -130,6 +138,7 @@ impl MyApp {
             gdb_state: gdb_state_handle.clone(),
             input_fields,
             state_history: gdb_state_hist,
+            persistent_data: persistent_data.clone(),
         }
     }
 
@@ -147,15 +156,10 @@ impl MyApp {
 impl eframe::epi::App for MyApp {
     fn update(&mut self, ctx: &eframe::egui::Context, frame: &eframe::epi::Frame) {
         // TODO: create a function to handle this
-        let cur_state = {
-            let s = self.gdb_state.lock().unwrap().clone();
-            s
-        };
 
-        let history = {
-            let h = self.state_history.lock().unwrap().clone();
-            h
-        };
+        let cur_state = { self.gdb_state.lock().unwrap().clone() };
+        let persistent_data = { self.persistent_data.lock().unwrap().clone() };
+        let history = { self.state_history.lock().unwrap().clone() };
 
         let (next_state, cmds) = control::advance_cmds(&cur_state);
 
@@ -187,7 +191,9 @@ impl eframe::epi::App for MyApp {
 
                     ui.separator();
 
-                    ui.monospace(format!("state: {cur_state:?}"));
+                    ui.collapsing("Current state", |ui| {
+                        ui.monospace(format!("state: {cur_state:?}"));
+                    });
 
                     for (i, (label, default)) in cur_state.input_fields().iter().enumerate() {
                         ui.horizontal(|ui| {
@@ -277,8 +283,8 @@ impl eframe::epi::App for MyApp {
                 });
             });
 
-            ui::current_file(ui, &cur_state);
-            ui::stack_frame(ui, &cur_state);
+            ui::current_file(ui, &cur_state, &persistent_data);
+            ui::stack_frame(ui, &cur_state, &persistent_data);
         });
 
         //if buttons.iter().any(|x| *x) {
